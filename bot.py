@@ -1,102 +1,126 @@
 import asyncio
 import json
 import random
+import os
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import TOKEN, ADMIN_ID
+# ================== ENV ==================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-bot = Bot(TOKEN)
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN is not set in Railway Variables")
+
+# ================== BOT ==================
+bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== ЗАГРУЗКА ВОПРОСОВ =====
-with open("questions.json", "r", encoding="utf-8") as f:
-    QUESTIONS = json.load(f)
+# ================== DATA ==================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ===== СЕССИИ ПОЛЬЗОВАТЕЛЕЙ =====
+def load_json(name, default):
+    path = os.path.join(BASE_DIR, name)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return default
+
+def save_json(name, data):
+    path = os.path.join(BASE_DIR, name)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+QUESTIONS = load_json("questions.json", [])
+users = load_json("users.json", [])
+
 user_sessions = {}
 
-# ===== СОХРАНЕНИЕ ПОЛЬЗОВАТЕЛЕЙ =====
-def save_user(user):
-    try:
-        with open("users.json", "r", encoding="utf-8") as f:
-            users = json.load(f)
-    except:
-        users = []
+# ================== USERS ==================
+def save_user(user: types.User):
+    if any(u["id"] == user.id for u in users):
+        return
 
-    if not any(u["id"] == user.id for u in users):
-        users.append({
-            "id": user.id,
-            "username": user.username,
-            "first_name": user.first_name,
-            "joined": datetime.now().strftime("%Y-%m-%d %H:%M")
-        })
+    users.append({
+        "id": user.id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "joined": datetime.now().strftime("%Y-%m-%d %H:%M")
+    })
+    save_json("users.json", users)
 
-        with open("users.json", "w", encoding="utf-8") as f:
-            json.dump(users, f, ensure_ascii=False, indent=2)
-
-# ===== ИНИЦИАЛИЗАЦИЯ СЕССИИ =====
+# ================== GAME ==================
 def init_session(user_id: int):
     order = list(range(len(QUESTIONS)))
     random.shuffle(order)
     user_sessions[user_id] = {
         "order": order,
-        "current_q": None,
-        "correct_index": None
+        "current": None,
+        "correct": None,
+        "options": None
     }
 
-def get_next_question(user_id: int):
+def get_question(user_id: int):
     session = user_sessions[user_id]
-
     if not session["order"]:
         session["order"] = list(range(len(QUESTIONS)))
         random.shuffle(session["order"])
 
     q_index = session["order"].pop()
-    session["current_q"] = q_index
+    session["current"] = q_index
     return QUESTIONS[q_index]
 
-# ===== ОТПРАВКА ВОПРОСА =====
 async def send_question(user_id: int, chat_id: int):
-    q = get_next_question(user_id)
+    q = get_question(user_id)
 
     indexed = list(enumerate(q["options"]))
     random.shuffle(indexed)
 
     options = [o[1] for o in indexed]
-    correct_index = next(
-        i for i, o in enumerate(indexed)
-        if o[0] == q["correct"]
-    )
 
-    user_sessions[user_id]["correct_index"] = correct_index
+    # индекс правильного ответа в перемешанном списке
+    correct = next(i for i, o in enumerate(indexed) if o[0] == q["correct"])
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=opt, callback_data=str(i))]
-            for i, opt in enumerate(options)
-        ]
-    )
+    user_sessions[user_id]["correct"] = correct
+    user_sessions[user_id]["options"] = options
 
-    await bot.send_message(
-        chat_id,
-        q["question"],
-        reply_markup=keyboard
-    )
+    letters = ["A", "B", "C", "D", "E", "F"]
 
-# ===== /START =====
+    # ===== текст вопроса + варианты =====
+    text = f"📝 {q['question']}\n\n"
+    for i, opt in enumerate(options):
+        text += f"{letters[i]}) {opt}\n\n"
+
+    # ===== кнопки 2×2 =====
+    rows = []
+    row = []
+
+    for i in range(len(options)):
+        row.append(InlineKeyboardButton(text=letters[i], callback_data=str(i)))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+
+    if row:
+        rows.append(row)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    await bot.send_message(chat_id, text, reply_markup=kb)
+
+# ================== HANDLERS ==================
 @dp.message(CommandStart())
 async def start(message: types.Message):
     save_user(message.from_user)
     init_session(message.from_user.id)
     await send_question(message.from_user.id, message.chat.id)
 
-# ===== ОБРАБОТКА ОТВЕТА =====
 @dp.callback_query()
-async def handle_answer(callback: types.CallbackQuery):
+async def answer(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     session = user_sessions.get(user_id)
 
@@ -105,68 +129,67 @@ async def handle_answer(callback: types.CallbackQuery):
         return
 
     user_answer = int(callback.data)
-    correct_answer = session["correct_index"]
+    correct_answer = session["correct"]
 
-    q = QUESTIONS[session["current_q"]]
-    correct_text = q["options"][q["correct"]]
+    q = QUESTIONS[session["current"]]
+
+    # правильный вариант (в перемешанном виде)
+    options = session.get("options", q["options"])
+    correct_text = options[correct_answer]
 
     if user_answer == correct_answer:
-        result = f"✔ Верно!\n\nПравильный ответ:\n{correct_text}"
+        result = "✅ Верно! ✅"
     else:
-        result = f"❌ Неверно\n\nВерный ответ:\n{correct_text}"
+        result = "❌ Неверно"
 
-    # Вопрос остаётся, кнопки исчезают
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(result)
+    text = (
+    f"{result}\n\n"
+    f"📝 {q['question']}\n\n"
+    f"Правильный ответ:\n"
+    f"<b>{correct_text}</b>"
+    )
+
+
+    await callback.message.edit_text(text, reply_markup=None, parse_mode="HTML")
+    await callback.answer()
 
     await asyncio.sleep(1.5)
     await send_question(user_id, callback.message.chat.id)
 
-# ===== /USINFO (ТОЛЬКО АДМИН) =====
+# ================== ADMIN ==================
 @dp.message(Command("usinfo"))
 async def usinfo(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    try:
-        with open("users.json", "r", encoding="utf-8") as f:
-            users = json.load(f)
-    except:
-        users = []
+    users_list = load_json("users.json", [])
 
-    text = f"👥 Пользователи бота\n\nВсего: {len(users)}\n\n"
-
-    for u in users[-10:]:
+    text = f"👥 Пользователей: {len(users_list)}\n\n"
+    for u in users_list:
         text += (
-            f"• {u['first_name'] or 'Без имени'} "
-            f"(@{u['username']})\n"
+            f"{u.get('first_name', 'Без имени')} (@{u.get('username')})\n"
             f"ID: {u['id']}\n"
             f"С: {u['joined']}\n\n"
         )
 
     await message.answer(text)
 
-# ===== /BROADCAST (ТОЛЬКО АДМИН) =====
 @dp.message(Command("broadcast"))
 async def broadcast(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    text = message.text.replace("/broadcast", "").strip()
+    text = message.text.replace("/broadcast", "", 1).strip()
     if not text:
         await message.answer("❗ Напиши текст после /broadcast")
         return
 
-    try:
-        with open("users.json", "r", encoding="utf-8") as f:
-            users = json.load(f)
-    except:
-        users = []
+    users_list = load_json("users.json", [])
 
     sent = 0
     failed = 0
 
-    for u in users:
+    for u in users_list:
         try:
             await bot.send_message(
                 u["id"],
@@ -183,8 +206,10 @@ async def broadcast(message: types.Message):
         f"Не доставлено: {failed}"
     )
 
-# ===== ЗАПУСК =====
+# ================== START ==================
 async def main():
+    print("🤖 Bot started (Railway)")
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

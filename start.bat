@@ -3,7 +3,7 @@ echo ==============================
 echo   Telegram Bot is starting...
 echo ==============================
 
-python bot.py
+python convert_docx_to_json.py
 
 echo.
 echo Bot stopped. Press any key...

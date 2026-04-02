@@ -1,2 +1,7 @@
-TOKEN = "7294911970:AAHKg3yl3JKLw_uZS64q6z4Yif05FMtfQI0"
-ADMIN_ID = 5328760224
+import os
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = '5328760224'
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set in Railway Variables")
+
